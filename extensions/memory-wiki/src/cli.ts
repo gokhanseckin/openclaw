@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import type { Command } from "commander";
+import { callGatewayFromCli } from "openclaw/plugin-sdk/gateway-runtime";
 import type { OpenClawConfig } from "../api.js";
 import { applyMemoryWikiMutation } from "./apply.js";
 import {
@@ -27,13 +28,32 @@ import {
 } from "./obsidian.js";
 import { getMemoryWikiPage, searchMemoryWiki } from "./query.js";
 import { syncMemoryWikiImportedSources } from "./source-sync.js";
+import type { MemoryWikiImportedSourceSyncResult } from "./source-sync.js";
 import {
   buildMemoryWikiDoctorReport,
   renderMemoryWikiDoctor,
   renderMemoryWikiStatus,
+  type MemoryWikiDoctorReport,
+  type MemoryWikiStatus,
   resolveMemoryWikiStatus,
 } from "./status.js";
 import { initializeMemoryWikiVault } from "./vault.js";
+
+const WIKI_GATEWAY_TIMEOUT_MS = "30000";
+const GATEWAY_TERMINAL_STRING_MAX_CHARS = 2_000;
+const GATEWAY_TERMINAL_MAX_DEPTH = 30;
+const GATEWAY_TERMINAL_MAX_NODES = 10_000;
+const GATEWAY_TERMINAL_MAX_ARRAY_ITEMS = 200;
+const GATEWAY_TERMINAL_MAX_OBJECT_ENTRIES = 200;
+const ANSI_ESCAPE_SEQUENCE_PATTERN = new RegExp(
+  String.raw`(?:\x1B\[[0-?]*[ -/]*[@-~]|\x1B[@-Z\\-_]|\x9B[0-?]*[ -/]*[@-~])`,
+  "g",
+);
+const TERMINAL_CONTROL_CHARACTER_PATTERN = new RegExp(String.raw`[\x00-\x1F\x7F-\x9F]+`, "g");
+
+type GatewayTerminalSanitizeBudget = {
+  visited: number;
+};
 
 type WikiStatusCommandOptions = {
   json?: boolean;
@@ -147,6 +167,60 @@ function writeOutput(output: string, writer: Pick<NodeJS.WriteStream, "write"> =
   writer.write(output.endsWith("\n") ? output : `${output}\n`);
 }
 
+function shouldRouteBridgeRuntimeThroughGateway(config: ResolvedMemoryWikiConfig): boolean {
+  return (
+    config.vaultMode === "bridge" && config.bridge.enabled && config.bridge.readMemoryArtifacts
+  );
+}
+
+async function callWikiGateway<T>(
+  method: "wiki.status" | "wiki.doctor" | "wiki.bridge.import",
+): Promise<T> {
+  return (await callGatewayFromCli(method, { timeout: WIKI_GATEWAY_TIMEOUT_MS }, undefined, {
+    progress: false,
+  })) as T;
+}
+
+function sanitizeGatewayStringForTerminal(value: string): string {
+  const sanitized = value
+    .replace(ANSI_ESCAPE_SEQUENCE_PATTERN, "")
+    .replace(TERMINAL_CONTROL_CHARACTER_PATTERN, " ");
+  if (sanitized.length <= GATEWAY_TERMINAL_STRING_MAX_CHARS) {
+    return sanitized;
+  }
+  return `${sanitized.slice(0, GATEWAY_TERMINAL_STRING_MAX_CHARS)}... [truncated]`;
+}
+
+function sanitizeGatewayResultForTerminal<T>(
+  value: T,
+  depth = 0,
+  budget: GatewayTerminalSanitizeBudget = { visited: 0 },
+): T {
+  budget.visited += 1;
+  if (budget.visited > GATEWAY_TERMINAL_MAX_NODES) {
+    return "[truncated: max nodes]" as T;
+  }
+  if (depth > GATEWAY_TERMINAL_MAX_DEPTH) {
+    return "[truncated: max depth]" as T;
+  }
+  if (typeof value === "string") {
+    return sanitizeGatewayStringForTerminal(value) as T;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, GATEWAY_TERMINAL_MAX_ARRAY_ITEMS)
+      .map((item) => sanitizeGatewayResultForTerminal(item, depth + 1, budget)) as T;
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, GATEWAY_TERMINAL_MAX_OBJECT_ENTRIES)
+        .map(([key, item]) => [key, sanitizeGatewayResultForTerminal(item, depth + 1, budget)]),
+    ) as T;
+  }
+  return value;
+}
+
 function normalizeCliStringList(values?: string[]): string[] | undefined {
   if (!values) {
     return undefined;
@@ -199,6 +273,14 @@ function formatJsonOrText<T>(
   render: (result: T) => string,
 ): string {
   return json ? JSON.stringify(result, null, 2) : render(result);
+}
+
+function formatGatewayJsonOrText<T>(
+  result: T,
+  json: boolean | undefined,
+  render: (result: T) => string,
+): string {
+  return formatJsonOrText(json ? result : sanitizeGatewayResultForTerminal(result), json, render);
 }
 
 async function runWikiCommandWithSummary<T>(params: {
@@ -255,12 +337,19 @@ export async function runWikiStatus(params: {
   json?: boolean;
   stdout?: Pick<NodeJS.WriteStream, "write">;
 }) {
-  await syncMemoryWikiImportedSources({ config: params.config, appConfig: params.appConfig });
-  const status = await resolveMemoryWikiStatus(params.config, {
-    appConfig: params.appConfig,
-  });
+  const routeThroughGateway = shouldRouteBridgeRuntimeThroughGateway(params.config);
+  const status = routeThroughGateway
+    ? await callWikiGateway<MemoryWikiStatus>("wiki.status")
+    : await (async () => {
+        await syncMemoryWikiImportedSources({ config: params.config, appConfig: params.appConfig });
+        return await resolveMemoryWikiStatus(params.config, {
+          appConfig: params.appConfig,
+        });
+      })();
   writeOutput(
-    params.json ? JSON.stringify(status, null, 2) : renderMemoryWikiStatus(status),
+    routeThroughGateway
+      ? formatGatewayJsonOrText(status, params.json, renderMemoryWikiStatus)
+      : formatJsonOrText(status, params.json, renderMemoryWikiStatus),
     params.stdout,
   );
   return status;
@@ -272,17 +361,24 @@ export async function runWikiDoctor(params: {
   json?: boolean;
   stdout?: Pick<NodeJS.WriteStream, "write">;
 }) {
-  await syncMemoryWikiImportedSources({ config: params.config, appConfig: params.appConfig });
-  const report = buildMemoryWikiDoctorReport(
-    await resolveMemoryWikiStatus(params.config, {
-      appConfig: params.appConfig,
-    }),
-  );
+  const routeThroughGateway = shouldRouteBridgeRuntimeThroughGateway(params.config);
+  const report = routeThroughGateway
+    ? await callWikiGateway<MemoryWikiDoctorReport>("wiki.doctor")
+    : await (async () => {
+        await syncMemoryWikiImportedSources({ config: params.config, appConfig: params.appConfig });
+        return buildMemoryWikiDoctorReport(
+          await resolveMemoryWikiStatus(params.config, {
+            appConfig: params.appConfig,
+          }),
+        );
+      })();
   if (!report.healthy) {
     process.exitCode = 1;
   }
   writeOutput(
-    params.json ? JSON.stringify(report, null, 2) : renderMemoryWikiDoctor(report),
+    routeThroughGateway
+      ? formatGatewayJsonOrText(report, params.json, renderMemoryWikiDoctor)
+      : formatJsonOrText(report, params.json, renderMemoryWikiDoctor),
     params.stdout,
   );
   return report;
@@ -505,6 +601,13 @@ export async function runWikiBridgeImport(params: {
   json?: boolean;
   stdout?: Pick<NodeJS.WriteStream, "write">;
 }) {
+  const render = (value: MemoryWikiImportedSourceSyncResult) =>
+    `Bridge import synced ${value.artifactCount} artifacts across ${value.workspaces} workspaces (${value.importedCount} new, ${value.updatedCount} updated, ${value.skippedCount} unchanged, ${value.removedCount} removed). Indexes ${value.indexesRefreshed ? `refreshed (${value.indexUpdatedFiles.length} files)` : `not refreshed (${value.indexRefreshReason})`}.`;
+  if (shouldRouteBridgeRuntimeThroughGateway(params.config)) {
+    const result = await callWikiGateway<MemoryWikiImportedSourceSyncResult>("wiki.bridge.import");
+    writeOutput(formatGatewayJsonOrText(result, params.json, render), params.stdout);
+    return result;
+  }
   return runWikiCommandWithSummary({
     json: params.json,
     stdout: params.stdout,
@@ -513,8 +616,7 @@ export async function runWikiBridgeImport(params: {
         config: params.config,
         appConfig: params.appConfig,
       }),
-    render: (value) =>
-      `Bridge import synced ${value.artifactCount} artifacts across ${value.workspaces} workspaces (${value.importedCount} new, ${value.updatedCount} updated, ${value.skippedCount} unchanged, ${value.removedCount} removed). Indexes ${value.indexesRefreshed ? `refreshed (${value.indexUpdatedFiles.length} files)` : `not refreshed (${value.indexRefreshReason})`}.`,
+    render,
   });
 }
 
