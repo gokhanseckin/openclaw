@@ -49,19 +49,20 @@ ssh -L 18789:127.0.0.1:18789 root@178.104.45.149
 open http://localhost:18789
 ```
 
-## After deploy: onboarding
+## After deploy: setup, then enable
 
-OpenClaw needs an interactive onboarding step to pick integrations
-(Telegram/Slack/etc.). Run as the service user once:
-
-```bash
-ssh root@178.104.45.149 'sudo -u openclaw HOME=/var/lib/openclaw openclaw onboard'
-```
-
-Then fill `/etc/openclaw/env` (mode 0600) with any required secrets and:
+The gateway refuses to start without an initial configuration — that's why the
+ansible role installs the unit but leaves it **disabled**. Run setup once
+(interactive, picks an account/mode), then enable + start:
 
 ```bash
-ssh root@178.104.45.149 'systemctl restart openclaw-gateway'
+ssh root@178.104.45.149
+# as the service user:
+sudo -u openclaw HOME=/var/lib/openclaw openclaw setup
+# optional: pick integrations (Telegram/Slack/etc.)
+sudo -u openclaw HOME=/var/lib/openclaw openclaw onboard
+# then fill /etc/openclaw/env (mode 0600) with any required secrets, and:
+sudo systemctl enable --now openclaw-gateway
 ```
 
 ## Verify the tbc stack is unaffected

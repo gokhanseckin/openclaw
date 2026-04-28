@@ -83,12 +83,15 @@
     - Reload systemd
     - Restart openclaw-gateway
 
-- name: Enable and start openclaw-gateway
+- name: Reload systemd so it sees the unit (do NOT enable/start)
   ansible.builtin.systemd:
-    name: openclaw-gateway
-    enabled: true
-    state: started
     daemon_reload: true
+
+# We deliberately do not enable or start openclaw-gateway here. The gateway
+# refuses to run until `openclaw setup` (interactive) has been completed once.
+# Auto-starting an unconfigured gateway puts it in a 5s restart loop that
+# burns CPU on the shared host. After setup, enable+start with:
+#   sudo systemctl enable --now openclaw-gateway
 
 # NOTE: No Caddy block. Per upstream's SECURITY.md, the Gateway must not be
 # exposed publicly. Reach it from your laptop via:
