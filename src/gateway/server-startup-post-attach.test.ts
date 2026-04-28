@@ -313,6 +313,11 @@ describe("startGatewayPostAttachRuntime", () => {
   });
 
   it("starts channels without waiting for primary model prewarm completion", async () => {
+    const previousSkipChannels = process.env.OPENCLAW_SKIP_CHANNELS;
+    const previousSkipProviders = process.env.OPENCLAW_SKIP_PROVIDERS;
+    delete process.env.OPENCLAW_SKIP_CHANNELS;
+    delete process.env.OPENCLAW_SKIP_PROVIDERS;
+
     let resolvePrewarm!: () => void;
     const prewarmPrimaryModel = vi.fn(
       async () =>
@@ -322,39 +327,51 @@ describe("startGatewayPostAttachRuntime", () => {
     );
     const startChannels = vi.fn(async () => undefined);
 
-    const sidecarsPromise = startGatewaySidecars({
-      cfg: {
-        hooks: { internal: { enabled: false } },
-        agents: { defaults: { model: "openai/gpt-5.4" } },
-      } as never,
-      pluginRegistry: createPostAttachParams().pluginRegistry,
-      defaultWorkspaceDir: "/tmp/openclaw-workspace",
-      deps: {} as never,
-      startChannels,
-      prewarmPrimaryModel: prewarmPrimaryModel as never,
-      log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
-    });
+    try {
+      const sidecarsPromise = startGatewaySidecars({
+        cfg: {
+          hooks: { internal: { enabled: false } },
+          agents: { defaults: { model: "openai/gpt-5.4" } },
+        } as never,
+        pluginRegistry: createPostAttachParams().pluginRegistry,
+        defaultWorkspaceDir: "/tmp/openclaw-workspace",
+        deps: {} as never,
+        startChannels,
+        prewarmPrimaryModel: prewarmPrimaryModel as never,
+        log: { warn: vi.fn() },
+        logHooks: {
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+        logChannels: {
+          info: vi.fn(),
+          error: vi.fn(),
+        },
+      });
 
-    await vi.waitFor(
-      () => {
-        expect(prewarmPrimaryModel).toHaveBeenCalledTimes(1);
-        expect(startChannels).toHaveBeenCalledTimes(1);
-      },
-      { timeout: 2_000 },
-    );
-    await sidecarsPromise;
-
-    resolvePrewarm();
-    await Promise.resolve();
+      await vi.waitFor(
+        () => {
+          expect(prewarmPrimaryModel).toHaveBeenCalledTimes(1);
+          expect(startChannels).toHaveBeenCalledTimes(1);
+        },
+        { timeout: 2_000 },
+      );
+      resolvePrewarm();
+      await sidecarsPromise;
+      await Promise.resolve();
+    } finally {
+      if (previousSkipChannels === undefined) {
+        delete process.env.OPENCLAW_SKIP_CHANNELS;
+      } else {
+        process.env.OPENCLAW_SKIP_CHANNELS = previousSkipChannels;
+      }
+      if (previousSkipProviders === undefined) {
+        delete process.env.OPENCLAW_SKIP_PROVIDERS;
+      } else {
+        process.env.OPENCLAW_SKIP_PROVIDERS = previousSkipProviders;
+      }
+    }
   });
 
   it("keeps startup-gated methods unavailable while sidecars are still resuming", async () => {
