@@ -1,0 +1,25 @@
+---
+- name: OpenClaw deploy (additive — does not touch tbc stack)
+  hosts: openclaw
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Sanity check — port {{ openclaw_port }} is free
+      ansible.builtin.shell: |
+        set -o pipefail
+        if ss -tlnH "sport = :{{ openclaw_port }}" | grep -q .; then
+          echo "Port {{ openclaw_port }} is already in use:"
+          ss -tlnp "sport = :{{ openclaw_port }}"
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Sanity check — Caddyfile is currently valid
+      ansible.builtin.command: caddy validate --config /etc/caddy/Caddyfile
+      changed_when: false
+
+  roles:
+    - openclaw

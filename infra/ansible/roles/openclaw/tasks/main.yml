@@ -1,0 +1,96 @@
+---
+# ── System user ────────────────────────────────────────────────────────────────
+
+- name: Create openclaw system group
+  ansible.builtin.group:
+    name: openclaw
+    system: true
+    state: present
+
+- name: Create openclaw system user
+  ansible.builtin.user:
+    name: openclaw
+    group: openclaw
+    home: /var/lib/openclaw
+    create_home: true
+    system: true
+    shell: /usr/sbin/nologin
+    state: present
+
+- name: Create /etc/openclaw for env file
+  ansible.builtin.file:
+    path: /etc/openclaw
+    state: directory
+    owner: openclaw
+    group: openclaw
+    mode: "0700"
+
+- name: Create placeholder env file (never overwrite real secrets)
+  ansible.builtin.copy:
+    dest: /etc/openclaw/env
+    content: |
+      # Secrets for openclaw-gateway. Fill in by hand. Mode 0600.
+      # ANTHROPIC_API_KEY=
+      # OPENCLAW_TELEGRAM_BOT_TOKEN=
+      # OPENCLAW_SLACK_BOT_TOKEN=
+    owner: openclaw
+    group: openclaw
+    mode: "0600"
+    force: false
+
+# ── Node.js 24 (NodeSource) ────────────────────────────────────────────────────
+
+- name: Add NodeSource APT signing key
+  ansible.builtin.apt_key:
+    url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
+    state: present
+
+- name: Add NodeSource APT repo (Node 24)
+  ansible.builtin.apt_repository:
+    repo: "deb https://deb.nodesource.com/node_24.x nodistro main"
+    state: present
+    filename: nodesource
+
+- name: Install Node.js 24
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+    update_cache: true
+
+# ── OpenClaw via npm global install ────────────────────────────────────────────
+# We install the published tarball (already built). Cloning the fork and running
+# `pnpm build` would need ~3 GB of build deps. The fork on GitHub stays as our
+# tracking copy / future PR base; the *running* code is the pinned npm release.
+
+- name: Install pinned OpenClaw release
+  community.general.npm:
+    name: openclaw
+    version: "{{ openclaw_version | regex_replace('^v', '') }}"
+    global: true
+    state: present
+  notify: Restart openclaw-gateway
+
+# ── systemd service ────────────────────────────────────────────────────────────
+
+- name: Install openclaw-gateway.service unit
+  ansible.builtin.template:
+    src: openclaw-gateway.service.j2
+    dest: /etc/systemd/system/openclaw-gateway.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart openclaw-gateway
+
+- name: Enable and start openclaw-gateway
+  ansible.builtin.systemd:
+    name: openclaw-gateway
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# NOTE: No Caddy block. Per upstream's SECURITY.md, the Gateway must not be
+# exposed publicly. Reach it from your laptop via:
+#   ssh -L 18789:127.0.0.1:18789 root@178.104.45.149
+#   then open http://localhost:18789

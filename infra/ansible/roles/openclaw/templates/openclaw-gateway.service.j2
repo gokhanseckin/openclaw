@@ -1,0 +1,38 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openclaw
+Group=openclaw
+WorkingDirectory=/var/lib/openclaw
+EnvironmentFile=/etc/openclaw/env
+# --bind loopback: the gateway only listens on 127.0.0.1, never on a public
+# interface. Caddy is the only thing in front of it. Switching to --bind lan
+# would require setting OPENCLAW_GATEWAY_TOKEN in /etc/openclaw/env.
+ExecStart=/usr/bin/openclaw gateway --port {{ openclaw_port }} --bind loopback
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+SuccessExitStatus=0 143
+KillMode=control-group
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+ReadWritePaths=/var/lib/openclaw
+StateDirectory=openclaw
+
+[Install]
+WantedBy=multi-user.target

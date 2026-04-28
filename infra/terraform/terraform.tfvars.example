@@ -1,0 +1,4 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+# Or export TF_VAR_hcloud_token=... in your shell instead — preferred for CI.
+
+hcloud_token = "REPLACE_ME"
