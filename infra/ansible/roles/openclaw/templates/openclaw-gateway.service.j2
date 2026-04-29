@@ -13,7 +13,11 @@ EnvironmentFile=/etc/openclaw/env
 # interface. Caddy is the only thing in front of it. Switching to --bind lan
 # would require setting OPENCLAW_GATEWAY_TOKEN in /etc/openclaw/env.
 ExecStart=/usr/bin/openclaw gateway --port {{ openclaw_port }} --bind loopback
-Restart=on-failure
+# Restart=always (not on-failure): the gateway exits 0 when it self-triggers a
+# "supervisor restart" — e.g. after an auth/MCP config change that requires a
+# full process restart (SIGUSR1 path). With Restart=on-failure, that clean
+# exit leaves the unit dead until manual intervention.
+Restart=always
 RestartSec=5
 TimeoutStopSec=30
 SuccessExitStatus=0 143
